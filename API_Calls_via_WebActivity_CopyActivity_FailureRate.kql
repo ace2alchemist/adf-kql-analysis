@@ -1,0 +1,43 @@
+// Define time range variables
+let BaselineStart = startofday(ago(30d));  
+let BaselineEnd   = startofday(ago(7d));  
+let CurrentStart  = startofday(ago(4d));  
+let CurrentEnd    = startofday(now());
+
+// Create a view for failed activities
+let View_FailedActivities = view () {
+    ADFActivityRun
+    | where Status == "Failed"
+    | extend InputParsed = todynamic(Input), 
+             OutputParsed = todynamic(Output)
+    | extend SourceType = tostring(InputParsed.source.type)
+    | extend ActivityTypeFinal = iff(ActivityType == "Copy" and SourceType == "RestSource", "CopyActivity-RestAPI_DS", ActivityType)
+    | where ActivityTypeFinal in ("WebActivity", "CopyActivity-RestAPI_DS")
+};
+
+// Create a view that bins failed activities by day (1d) over the baseline period
+let View_BaselineDaily = view () {
+    View_FailedActivities
+    | where Start between (BaselineStart .. BaselineEnd)
+    | summarize DailyFailures = count() by PipelineName, ActivityName, Day = bin(Start, 1d)
+};
+
+// Compute the average daily failures per pipeline and activity from the binned data
+let View_BaselineFailure = view () {
+    View_BaselineDaily
+    | summarize BaselineDailyAvg = avg(DailyFailures) by PipelineName, ActivityName
+};
+
+// Create a view for current failure counts aggregated over the current period
+let View_CurrentFailure = view () {
+    View_FailedActivities
+    | where Start between (CurrentStart .. CurrentEnd)
+    | summarize CurrentTotal = count() by PipelineName, ActivityName
+};
+
+// Join the baseline and current views and flag alerts if the current total exceeds 1.5 times the baseline daily average
+View_BaselineFailure
+| join kind=leftouter View_CurrentFailure on PipelineName, ActivityName
+| extend Notify = iff(CurrentTotal > (BaselineDailyAvg * 1.5), "Alert", "Normal")
+| project PipelineName, ActivityName, CurrentTotal, BaselineDailyAvg, Notify
+| order by PipelineName asc, ActivityName asc
